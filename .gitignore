@@ -17,7 +17,12 @@ secrets/
 clients/
 clients/revoked/
 
-# Examples that contain real-looking keys/QR material
+# wg0.conf backups produced by add-client.sh / revoke-client.sh
+backups/
+*.bak
+
+# Examples folder is intentionally empty in this repo; placeholder rule kept
+# so that real-looking keys dropped in by accident won't be committed.
 examples/wireguard-clients/*.conf
 examples/wireguard-clients/*.key
 examples/wireguard-clients/*.pub

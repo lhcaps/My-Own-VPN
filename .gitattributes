@@ -1,0 +1,18 @@
+# =============================================================================
+#  Git attributes for line-ending normalization.
+#  All source files use LF; Windows checkouts must not convert them.
+# =============================================================================
+*             text=auto eol=lf
+
+# Shell scripts: enforce LF even on Windows checkouts.
+*.sh           text eol=lf
+
+# GitHub Actions: YAML must use LF.
+*.yml          text eol=lf
+*.yaml         text eol=lf
+
+# Markdown / docs: LF.
+*.md           text eol=lf
+
+# License files: keep whatever the project ships with (LF).
+LICENSE        text eol=lf
