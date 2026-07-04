@@ -8,31 +8,36 @@
 #  Idempotent:
 #    - Keeps existing /etc/wireguard/server_*.key and /etc/wireguard/wg0.conf
 #    - Does NOT print the server private key
-#    - Opens a single UDP port (51820) and relies on Oracle Security List
+#    - Relies on Oracle Security List for ingress filtering
 #
 #  Run as root: sudo bash install-oracle-wireguard.sh
 # =============================================================================
 set -euo pipefail
 
-# ---- Guards ------------------------------------------------------------------
-if [[ $EUID -ne 0 ]]; then
-  echo "[FATAL] This script must be run as root (sudo)." >&2
-  exit 1
-fi
-
+# ---- Constants ---------------------------------------------------------------
 WG_IFACE="wg0"
 WG_PORT="51820"
 WG_SUBNET_CIDR="10.8.0.0/24"
 WG_SERVER_IP="10.8.0.1/24"
 WG_DIR="/etc/wireguard"
 WG_CLIENTS_DIR="${WG_DIR}/clients"
+WG_CONF="${WG_DIR}/${WG_IFACE}.conf"
 SYSCTL_FILE="/etc/sysctl.d/99-wireguard.conf"
+BACKUP_DIR="${WG_DIR}/backups"
 
-mkdir -p "${WG_DIR}" "${WG_CLIENTS_DIR}"
-chmod 700 "${WG_DIR}"
-chmod 700 "${WG_CLIENTS_DIR}"
+# ---- Guards ------------------------------------------------------------------
+if [[ ${EUID} -ne 0 ]]; then
+  echo "[FATAL] This script must be run as root (sudo)." >&2
+  exit 1
+fi
 
-# ---- Detect WAN interface (the interface used to reach the public internet) -
+# Make sure secrets we create are owner-readable only.
+umask 077
+
+mkdir -p "${WG_DIR}" "${WG_CLIENTS_DIR}" "${BACKUP_DIR}"
+chmod 700 "${WG_DIR}" "${WG_CLIENTS_DIR}" "${BACKUP_DIR}"
+
+# ---- Detect WAN interface ----------------------------------------------------
 WAN_IFACE="$(ip route get 1.1.1.1 2>/dev/null | awk '{print $5; exit}')"
 if [[ -z "${WAN_IFACE}" || "${WAN_IFACE}" == "unreachable" ]]; then
   echo "[FATAL] Could not detect WAN interface (ip route get 1.1.1.1 failed)." >&2
@@ -41,7 +46,7 @@ fi
 echo "[INFO] Detected WAN interface: ${WAN_IFACE}"
 
 # ---- Packages ----------------------------------------------------------------
-echo "[STEP] Installing wireguard, qrencode, iptables (and persistent loader)..."
+echo "[STEP] Installing wireguard, qrencode, iptables..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y --no-install-recommends \
@@ -66,7 +71,6 @@ SERVER_PUB="${WG_DIR}/server_public.key"
 
 if [[ ! -s "${SERVER_PRIV}" || ! -s "${SERVER_PUB}" ]]; then
   echo "[STEP] Generating server keypair..."
-  umask 077
   wg genkey | tee "${SERVER_PRIV}" | wg pubkey > "${SERVER_PUB}"
 else
   echo "[INFO] Server keypair already exists; reusing."
@@ -78,11 +82,10 @@ chmod 644 "${SERVER_PUB}"
 SERVER_PUB_KEY="$(cat "${SERVER_PUB}")"
 
 # ---- wg0.conf (keep if present) ---------------------------------------------
-WG_CONF="${WG_DIR}/${WG_IFACE}.conf"
-
 if [[ ! -s "${WG_CONF}" ]]; then
   echo "[STEP] Writing ${WG_CONF}..."
-  cat > "${WG_CONF}" <<EOF
+  # Secure umask for the file we are about to write.
+  (umask 077 && cat > "${WG_CONF}" <<EOF
 # WireGuard server config (managed by install-oracle-wireguard.sh)
 # Do NOT commit this file to version control.
 [Interface]
@@ -95,16 +98,17 @@ PostDown = iptables -t nat -D POSTROUTING -s ${WG_SUBNET_CIDR} -o ${WAN_IFACE} -
 
 # Peers are appended below by add-client.sh
 EOF
-  chmod 600 "${WG_CONF}"
+  )
 else
   echo "[INFO] ${WG_CONF} already exists; leaving untouched."
 fi
+chmod 600 "${WG_CONF}"
 
 # ---- Bring up WireGuard ------------------------------------------------------
 echo "[STEP] Enabling and starting wg-quick@${WG_IFACE}..."
 systemctl enable --now "wg-quick@${WG_IFACE}"
 
-# Best-effort: persist iptables rules so NAT survives reboot
+# Best-effort: persist iptables rules so NAT survives reboot.
 if command -v netfilter-persistent >/dev/null 2>&1; then
   netfilter-persistent save >/dev/null 2>&1 || true
 fi
@@ -130,15 +134,17 @@ cat <<EOF
    1. Open the OCI Console -> Networking -> Virtual Cloud Networks -> your VCN
    2. Subnets -> the regional subnet hosting this instance -> Security List
       -> Default Security List -> Add Ingress Rule:
-          Source CIDR : 0.0.0.0/0    (or your client public IPs for tighter scope)
-          Protocol    : UDP
+          Source CIDR    : 0.0.0.0/0   (or your client public IPs for tighter scope)
+          Protocol       : UDP
           Destination Port : 51820
-   3. Also verify the instance's iptables (Oracle Ubuntu images ship a default
+   3. If your VNIC also has a Network Security Group, add the same UDP/51820
+      rule there. OCI evaluates BOTH layers.
+   4. Also verify the instance's iptables (Oracle Ubuntu images ship a default
       iptables rule; this script does NOT disable it). Confirm with:
           sudo iptables -L INPUT -n --line-numbers
       If traffic is silently dropped, add:
           iptables -I INPUT 1 -p udp --dport ${WG_PORT} -j ACCEPT
-   4. Confirm UDP/${WG_PORT} inbound from a remote host:
+   5. Confirm UDP/${WG_PORT} inbound from a remote host:
           nc -uvz <public_ip> ${WG_PORT}
 
  Next steps:
