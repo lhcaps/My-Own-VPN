@@ -194,8 +194,10 @@ For legitimate uses: keep it boring, keep it legal, keep it small.
 
 ## 9. Keep the VM warm — Always Free reclamation
 
-Oracle may reclaim an Always Free compute instance when **all** of
-the following hold over a **continuous 7-day** period:
+Per the official
+[Always Free Resources](https://docs.oracle.com/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm)
+documentation, Oracle may reclaim an Always Free compute instance when
+**all** of the following hold over a **continuous 7-day window**:
 
 - CPU utilization, 95th percentile, below **20%**.
 - Network utilization below **20%**.
@@ -204,6 +206,10 @@ the following hold over a **continuous 7-day** period:
 When reclaimed, the compute is removed (boot volume is usually kept)
 and you may not be able to recreate it in the same region/shape. Lost
 VMs do not come back with the same public IP.
+
+> Thresholds have shifted over time (10% → 15% → 20% on different
+> shape generations, sometimes only one metric at a time). Cross-check
+> the live Oracle docs before relying on a specific number.
 
 Two practical countermeasures, pick at least one:
 

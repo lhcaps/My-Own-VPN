@@ -6,8 +6,15 @@
 #
 #  Allocates the next free IP in 10.8.0.0/24, writes a client config file
 #  under /etc/wireguard/clients/ (chmod 600), applies the peer via
-#  `wg syncconf wg0 <(wg-quick strip wg0)` (no service restart, no
-#  handshake drops), and prints a QR code on the terminal.
+#  `wg syncconf wg0 <(wg-quick strip wg0); wait $!` (no service restart,
+#  no handshake drops), and prints a QR code on the terminal.
+#
+#  The server's public endpoint is resolved from, in order:
+#    1. the WG_SERVER_ENDPOINT environment variable
+#    2. /etc/wireguard/server_endpoint
+#  We do NOT auto-detect it from `ip addr`: on Oracle Cloud the public IPv4
+#  is attached at the OCI edge, not on the VNIC, so `ip addr` returns a
+#  private IP and clients could never reach the server.
 #
 #  Usage: sudo bash add-client.sh <client-name>
 # =============================================================================
@@ -18,6 +25,7 @@ WG_PORT="51820"
 WG_SUBNET_CIDR="10.8.0.0/24"
 WG_DIR="/etc/wireguard"
 WG_CONF="${WG_DIR}/${WG_IFACE}.conf"
+WG_ENDPOINT_FILE="${WG_DIR}/server_endpoint"
 WG_CLIENTS_DIR="${WG_DIR}/clients"
 WG_BACKUP_DIR="${WG_DIR}/backups"
 LOCK_FILE="${WG_DIR}/.wg.lock"
@@ -57,14 +65,57 @@ umask 077
 mkdir -p "${WG_CLIENTS_DIR}" "${WG_BACKUP_DIR}"
 chmod 700 "${WG_CLIENTS_DIR}" "${WG_BACKUP_DIR}"
 
+# ---- Resolve server public endpoint -----------------------------------------
+# Priority: env var > file. We never auto-detect from the OS.
+resolve_server_endpoint() {
+  local raw=""
+
+  if [[ -n "${WG_SERVER_ENDPOINT:-}" ]]; then
+    raw="${WG_SERVER_ENDPOINT}"
+  elif [[ -s "${WG_ENDPOINT_FILE}" ]]; then
+    raw="$(tr -d '[:space:]' < "${WG_ENDPOINT_FILE}")"
+  fi
+
+  if [[ -z "${raw}" ]]; then
+    echo "[FATAL] Server public endpoint is not configured." >&2
+    echo "        Set it once:" >&2
+    echo "          echo '<PUBLIC_IP>:${WG_PORT}' | sudo tee ${WG_ENDPOINT_FILE}" >&2
+    echo "          sudo chmod 600 ${WG_ENDPOINT_FILE}" >&2
+    echo "        Or pass it to this command:" >&2
+    echo "          sudo WG_SERVER_ENDPOINT='<PUBLIC_IP>:${WG_PORT}' \\" >&2
+    echo "               bash scripts/wireguard/add-client.sh ${CLIENT_NAME}" >&2
+    echo "        Tip: get the public IP from the OCI Console -> Instances" >&2
+    echo "        -> your VM -> Networking -> Public IP. Do NOT use 'ip addr'" >&2
+    echo "        on Oracle Cloud - the VNIC only shows the private IP." >&2
+    exit 1
+  fi
+
+  # Validate format: host:port. Host may be IPv4 or a DNS name. Port is digits.
+  if [[ ! "${raw}" =~ ^\[?[A-Za-z0-9._:-]+\]?:[0-9]{1,5}$ ]]; then
+    echo "[FATAL] Endpoint '${raw}' is not a valid host:port." >&2
+    echo "        Expected e.g. '203.0.113.4:${WG_PORT}' or 'vpn.example.com:${WG_PORT}'." >&2
+    exit 1
+  fi
+
+  printf '%s\n' "${raw}"
+}
+
+SERVER_ENDPOINT="$(resolve_server_endpoint)"
+
 # ---- Allocate next free IP in 10.8.0.0/24 (.1 is the server) ---------------
-USED_IPS="$(wg show "${WG_IFACE}" allowed-ips 2>/dev/null || true)"
-USED_IPS+=$'\n'"${WG_SUBNET_CIDR}"
+# Combine the live kernel state AND the on-disk wg0.conf so we never allocate
+# a duplicate even if the two are briefly out of sync (after a wg syncconf
+# race, manual edit, etc).
+USED_IPS_LIVE="$(wg show "${WG_IFACE}" allowed-ips 2>/dev/null || true)"
+USED_IPS_FILE="$(grep -oE 'AllowedIPs[[:space:]]*=[[:space:]]*[^#[:space:]]*' "${WG_CONF}" 2>/dev/null \
+                 | sed -E 's/^[^=]*=[[:space:]]*//' || true)"
+
+USED_IPS="${USED_IPS_LIVE}"$'\n'"${USED_IPS_FILE}"$'\n'"${WG_SUBNET_CIDR}"
 
 ALLOCATED_IP=""
 for octet in $(seq 2 254); do
   candidate="10.8.0.${octet}"
-  if ! grep -q -E "(^|[[:space:]])${candidate}(/[[:digit:]]+)?([[:space:]]|$)" <<<"${USED_IPS}"; then
+  if ! grep -q -E "(^|[[:space:],])${candidate}(/[[:digit:]]+)?([[:space:],]|$)" <<<"${USED_IPS}"; then
     ALLOCATED_IP="${candidate}"
     break
   fi
@@ -92,14 +143,6 @@ chmod 600 "${CLIENT_PRIV}" "${CLIENT_PUB}"
 
 CLIENT_PUB_KEY="$(cat "${CLIENT_PUB}")"
 SERVER_PUB_KEY="$(cat "${WG_DIR}/server_public.key")"
-SERVER_ENDPOINT="$(
-  # First global IPv4 from the default route interface
-  ip -4 addr show scope global 2>/dev/null \
-    | awk '/inet /{print $2}' | head -n1 | cut -d/ -f1
-):${WG_PORT}"
-if [[ "${SERVER_ENDPOINT}" == ":${WG_PORT}" ]]; then
-  SERVER_ENDPOINT="<server-public-ip>:${WG_PORT}"
-fi
 
 # ---- Mutate wg0.conf under a lock -------------------------------------------
 exec 9>"${LOCK_FILE}"
@@ -121,17 +164,16 @@ chmod 600 "${BACKUP_FILE}"
 } >> "${WG_CONF}"
 chmod 600 "${WG_CONF}"
 
-# Validate before applying: wg-quick strip must succeed.
-wg-quick strip "${WG_IFACE}" > "${WG_DIR}/.wg.strip.tmp"
+# Apply live without restarting the interface (no handshake drops).
+# Process substitution does NOT propagate exit codes under `set -e`, so we
+# explicitly wait on $!. See wireguard-tools commit 26683f6c.
 if ! wg syncconf "${WG_IFACE}" <(wg-quick strip "${WG_IFACE}"); then
   echo "[FATAL] wg syncconf failed. Rolling back ${WG_CONF}." >&2
   cp -p "${BACKUP_FILE}" "${WG_CONF}"
   chmod 600 "${WG_CONF}"
-  rm -f "${WG_DIR}/.wg.strip.tmp"
   exit 1
 fi
 wait $!
-rm -f "${WG_DIR}/.wg.strip.tmp"
 
 # ---- Write client config ----------------------------------------------------
 (umask 077 && cat > "${CLIENT_CONF}" <<EOF
@@ -156,9 +198,10 @@ chmod 600 "${CLIENT_CONF}"
 cat <<EOF
 
 [OK] Client '${CLIENT_NAME}' added.
-     IP  : ${ALLOCATED_IP}
-     Pub : ${CLIENT_PUB_KEY}
-     Cfg : ${CLIENT_CONF}
+     IP       : ${ALLOCATED_IP}
+     Endpoint : ${SERVER_ENDPOINT}
+     Pub      : ${CLIENT_PUB_KEY}
+     Cfg      : ${CLIENT_CONF}
 
 Scan the QR code below with the WireGuard mobile app, or copy the file:
 

@@ -22,6 +22,7 @@ WG_SERVER_IP="10.8.0.1/24"
 WG_DIR="/etc/wireguard"
 WG_CLIENTS_DIR="${WG_DIR}/clients"
 WG_CONF="${WG_DIR}/${WG_IFACE}.conf"
+WG_ENDPOINT_FILE="${WG_DIR}/server_endpoint"
 SYSCTL_FILE="/etc/sysctl.d/99-wireguard.conf"
 BACKUP_DIR="${WG_DIR}/backups"
 
@@ -114,8 +115,14 @@ if command -v netfilter-persistent >/dev/null 2>&1; then
 fi
 
 # ---- Oracle Security List checklist -----------------------------------------
-PUBLIC_IP_V4="$(ip -4 addr show "${WAN_IFACE}" 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)"
-[[ -z "${PUBLIC_IP_V4}" ]] && PUBLIC_IP_V4="<not-detected>"
+# We deliberately do NOT auto-detect the public IPv4 here. On Oracle Cloud
+# the public IP is attached at the OCI edge; the VNIC only sees a private
+# 10.0.0.0/16 address. Auto-detect from `ip addr` is the #1 source of
+# "client config points at 10.x.x.x and never connects" bugs.
+SERVER_PUBLIC_IP="(not set)"
+if [[ -s "${WG_ENDPOINT_FILE}" ]]; then
+  SERVER_PUBLIC_IP="$(tr -d '[:space:]' < "${WG_ENDPOINT_FILE}")"
+fi
 
 cat <<EOF
 
@@ -126,9 +133,23 @@ cat <<EOF
  Listen port        : UDP ${WG_PORT}
  Subnet             : ${WG_SUBNET_CIDR}  (server ${WG_SERVER_IP})
  WAN interface      : ${WAN_IFACE}
- Server public IP   : ${PUBLIC_IP_V4}
  Server public key  : ${SERVER_PUB_KEY}
  Server private key : (not shown on purpose - kept in ${SERVER_PRIV}, mode 0600)
+
+ Server public endpoint : ${SERVER_PUBLIC_IP}
+   (This is what clients put in their [Peer] Endpoint = ... line.)
+
+   To set it, copy the public IPv4 from the OCI Console
+   (Compute -> Instances -> this VM -> Networking -> Public IP)
+   and run, once:
+
+       echo '<YOUR_PUBLIC_IPV4>:${WG_PORT}' | sudo tee ${WG_ENDPOINT_FILE}
+       sudo chmod 600 ${WG_ENDPOINT_FILE}
+
+   Or pass it inline when adding a client:
+
+       sudo WG_SERVER_ENDPOINT='<YOUR_PUBLIC_IPV4>:${WG_PORT}' \\
+            bash scripts/wireguard/add-client.sh <client-name>
 
  Oracle Cloud checklist (REQUIRED for clients to reach this server):
    1. Open the OCI Console -> Networking -> Virtual Cloud Networks -> your VCN
@@ -136,8 +157,8 @@ cat <<EOF
       -> Default Security List -> Add Ingress Rule:
           Source CIDR    : 0.0.0.0/0   (or your client public IPs for tighter scope)
           Protocol       : UDP
-          Destination Port : 51820
-   3. If your VNIC also has a Network Security Group, add the same UDP/51820
+          Destination Port : ${WG_PORT}
+   3. If your VNIC also has a Network Security Group, add the same UDP/${WG_PORT}
       rule there. OCI evaluates BOTH layers.
    4. Also verify the instance's iptables (Oracle Ubuntu images ship a default
       iptables rule; this script does NOT disable it). Confirm with:
@@ -145,10 +166,11 @@ cat <<EOF
       If traffic is silently dropped, add:
           iptables -I INPUT 1 -p udp --dport ${WG_PORT} -j ACCEPT
    5. Confirm UDP/${WG_PORT} inbound from a remote host:
-          nc -uvz <public_ip> ${WG_PORT}
+          nc -uvz <your_public_ipv4> ${WG_PORT}
 
  Next steps:
-   - Add a client: sudo bash scripts/wireguard/add-client.sh <name>
+   - Set the public endpoint (see above) and add a client:
+       sudo bash scripts/wireguard/add-client.sh <name>
    - Show status : sudo bash scripts/wireguard/show-status.sh
    - Revoke      : sudo bash scripts/wireguard/revoke-client.sh <name>
 ==============================================================================

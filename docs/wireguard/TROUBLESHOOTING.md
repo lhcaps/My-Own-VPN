@@ -296,8 +296,10 @@ The VM is up and reachable for a while, then disappears. Rebooting
 the instance creates a new **public IP** you didn't pick.
 
 ### Cause
-Oracle may reclaim an Always Free compute instance when **all** of
-the following hold over a **continuous 7-day** window:
+Per the official
+[Always Free Resources](https://docs.oracle.com/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm)
+documentation, Oracle may reclaim an Always Free compute instance when
+**all** of the following hold over a **continuous 7-day window**:
 
 - CPU utilization, 95th percentile, below **20%**.
 - Network utilization below **20%**.
@@ -305,6 +307,10 @@ the following hold over a **continuous 7-day** window:
 
 When reclaimed, the compute is removed (boot volume is usually kept).
 The public IP is gone; resources are returned to the pool.
+
+> Thresholds have shifted over time (10% → 15% → 20% on different
+> shape generations, sometimes only one metric at a time). Cross-check
+> the live Oracle docs before relying on a specific number.
 
 ### Fix
 - See [`GAMING_TUNING.md`](GAMING_TUNING.md) §9 — keep the VM warm

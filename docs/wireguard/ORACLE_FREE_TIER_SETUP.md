@@ -122,9 +122,14 @@ Confirm:
 
 ```bash
 sudo -i
-ip -4 addr show scope global      # confirm public IPv4 attached
+ip -4 addr show scope global      # note: shows PRIVATE IP, not public
 curl -4 ifconfig.io               # confirm outbound IPv4
 ```
+
+> ⚠️  `ip addr` shows the VNIC's **private** IP, not the public one. The
+> public IPv4 lives in the OCI Console and is attached at the cloud edge.
+> The bootstrap script does **not** auto-detect the public IP; you must
+> set `/etc/wireguard/server_endpoint` manually. See §10.
 
 ---
 
@@ -206,7 +211,9 @@ curl https://ifconfig.io       # should show Oracle's IP, not your ISP
 ## 11. Reclamation risk (read this)
 
 Oracle may reclaim Always Free compute instances if **all** of the
-following hold for a **continuous 7-day** window:
+following hold for a **continuous 7-day window**, per the official
+[Always Free Resources](https://docs.oracle.com/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm)
+documentation:
 
 - CPU utilization, 95th percentile, below **20%**.
 - Network utilization below **20%**.
@@ -216,6 +223,10 @@ When reclaimed, the compute is removed (boot volume is usually kept),
 and you may not be able to recreate it in the same region/shape. See
 [`GAMING_TUNING.md`](GAMING_TUNING.md) §"Keep the VM warm" for practical
 countermeasures.
+
+> Note: the exact thresholds have shifted over time (10% → 15% → 20% on
+> different shape generations). Always cross-check the live Oracle docs
+> link above before relying on a specific number.
 
 ---
 
