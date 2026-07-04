@@ -1,0 +1,37 @@
+﻿name: shellcheck
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck
+        run: |
+          set -e
+          shellcheck --shell=bash --severity=warning \
+            scripts/wireguard/install-oracle-wireguard.sh \
+            scripts/wireguard/add-client.sh \
+            scripts/wireguard/revoke-client.sh \
+            scripts/wireguard/show-status.sh
+
+      - name: Check bash syntax for scripts that source others
+        run: |
+          set -e
+          for f in scripts/wireguard/*.sh; do
+            bash -n "$f"
+          done
